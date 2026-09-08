@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>シフト時間集計ツール</title>
+<style>
+  :root {
+    --bg: #EDE6DA;
+    --surface: #FFFFFF;
+    --text-primary: #3B332B;
+    --text-secondary: #6B6156;
+    --accent: #3A5A78;
+    --on-accent: #FFFFFF;
+    --danger: #B3261E;
+    --border: #DDD2C0;
+  }
+  * { box-sizing: border-box; }
+  html, body { overflow-x: hidden; }
+  body {
+    margin: 0;
+    padding: 16px 12px 32px;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text-primary);
+    line-height: 1.5;
+  }
+  main {
+    max-width: 480px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  h1 {
+    font-size: 18px;
+    margin: 0;
+    text-align: center;
+  }
+  .lead {
+    margin: 0;
+    font-size: 14px;
+    color: var(--text-secondary);
+    text-align: center;
+  }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+  }
+  textarea {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    font-size: 16px;
+    font-family: inherit;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text-primary);
+    resize: vertical;
+  }
+  button {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 44px;
+    padding: 12px;
+    font-size: 16px;
+    font-weight: 600;
+    font-family: inherit;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--on-accent);
+    cursor: pointer;
+  }
+  button:active {
+    background: #2F4A62;
+  }
+  .errors {
+    color: var(--danger);
+    font-size: 14px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+  }
+  .errors p {
+    margin: 0 0 6px;
+    white-space: normal;
+    word-break: break-word;
+  }
+  .errors p:last-child {
+    margin-bottom: 0;
+  }
+  .results {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .results li {
+    font-size: 14px;
+    color: var(--text-secondary);
+    white-space: normal;
+    word-break: break-word;
+  }
+  .results li strong {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .total {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--accent);
+    text-align: center;
+    margin: 0;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>シフト時間集計ツール</h1>
+  <p class="lead">1行に「開始-終了」、休憩がある場合は「開始-終了 休憩分」で入力してください（例: 10:00-15:30 60）</p>
+
+  <div class="panel">
+    <textarea id="input" rows="8" placeholder="10:00-15:30&#10;13:00-22:00 60"></textarea>
+  </div>
+
+  <button id="calc-btn" type="button">集計する</button>
+
+  <div id="errors" class="errors" hidden></div>
+
+  <ul id="results" class="results"></ul>
+
+  <p id="total" class="total" hidden></p>
+</main>
+
+<script>
+(function () {
+  var STORAGE_KEY = 'shift-time-summary';
+  var textarea = document.getElementById('input');
+  var btn = document.getElementById('calc-btn');
+  var errorsEl = document.getElementById('errors');
+  var resultsEl = document.getElementById('results');
+  var totalEl = document.getElementById('total');
+
+  // 前回の入力を復元（任意機能。読み込み失敗時は無視する）
+  try {
+    var saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      var parsed = JSON.parse(saved);
+      if (parsed && typeof parsed.input === 'string') {
+        textarea.value = parsed.input;
+      }
+    }
+  } catch (e) {
+    /* localStorageが使えない環境では何もしない */
+  }
+
+  function saveInput() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ input: textarea.value }));
+    } catch (e) {
+      /* 保存できなくても集計自体は続行する */
+    }
+  }
+
+  var LINE_PATTERN = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})(?:\s+(\d+))?$/;
+
+  function parseLine(raw) {
+    var line = raw.trim();
+    if (line === '') return null; // 空行はスキップ
+
+    var m = LINE_PATTERN.exec(line);
+    if (!m) {
+      return { raw: line, ok: false };
+    }
+    var startH = parseInt(m[1], 10);
+    var startM = parseInt(m[2], 10);
+    var endH = parseInt(m[3], 10);
+    var endM = parseInt(m[4], 10);
+    var breakMin = m[5] !== undefined ? parseInt(m[5], 10) : 0;
+
+    if (startH > 23 || startM > 59 || endH > 23 || endM > 59) {
+      return { raw: line, ok: false };
+    }
+
+    var startTotal = startH * 60 + startM;
+    var endTotal = endH * 60 + endM;
+
+    if (endTotal <= startTotal) {
+      // 日またぎ・逆転はエラー扱い（対象外）
+      return { raw: line, ok: false };
+    }
+
+    var workMinutes = endTotal - startTotal - breakMin;
+    if (workMinutes < 0) {
+      // 休憩分が労働時間を超えている
+      return { raw: line, ok: false };
+    }
+
+    return { raw: line, ok: true, minutes: workMinutes };
+  }
+
+  function formatDuration(totalMinutes) {
+    var h = Math.floor(totalMinutes / 60);
+    var m = totalMinutes % 60;
+    if (m === 0) return h + '時間';
+    return h + '時間' + m + '分';
+  }
+
+  function render() {
+    var lines = textarea.value.split('\n');
+    var errorLines = [];
+    var okResults = [];
+    var totalMinutes = 0;
+
+    lines.forEach(function (raw, idx) {
+      var parsed = parseLine(raw);
+      if (parsed === null) return;
+      if (!parsed.ok) {
+        errorLines.push({ lineNo: idx + 1, raw: parsed.raw });
+        return;
+      }
+      okResults.push(parsed);
+      totalMinutes += parsed.minutes;
+    });
+
+    // エラー表示
+    errorsEl.innerHTML = '';
+    if (errorLines.length > 0) {
+      errorLines.forEach(function (err) {
+        var p = document.createElement('p');
+        p.textContent = '⚠ ' + err.lineNo + '行目: 「' + err.raw + '」を解析できません';
+        errorsEl.appendChild(p);
+      });
+      errorsEl.hidden = false;
+    } else {
+      errorsEl.hidden = true;
+    }
+
+    // 結果一覧
+    resultsEl.innerHTML = '';
+    okResults.forEach(function (r) {
+      var li = document.createElement('li');
+      var strong = document.createElement('strong');
+      strong.textContent = formatDuration(r.minutes);
+      li.appendChild(document.createTextNode(r.raw + ' → '));
+      li.appendChild(strong);
+      resultsEl.appendChild(li);
+    });
+
+    // 合計
+    if (okResults.length > 0) {
+      totalEl.textContent = '合計: ' + formatDuration(totalMinutes) + '（' + okResults.length + '件）';
+      totalEl.hidden = false;
+    } else {
+      totalEl.hidden = true;
+    }
+  }
+
+  btn.addEventListener('click', function () {
+    saveInput();
+    render();
+  });
+})();
+</script>
+</body>
+</html>
